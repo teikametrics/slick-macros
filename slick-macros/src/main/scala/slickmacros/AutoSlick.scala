@@ -20,13 +20,14 @@ import scala.reflect.macros.blackbox
   * */
 class AutoSlick extends scala.annotation.StaticAnnotation {
 
-  def macroTransform(annottees: Any*): Any =
-    macro AutoSlickMacros.caseClassMacro
+  def macroTransform(annottees: Any*): Any = macro AutoSlickMacros.basicMacro
 }
 
 object AutoSlick {
 
-  /** Generate a mixin trait with instances for `T`
+  /** Generate shapeless.Generic-based instances instances for `T` in the annotated body.
+    *
+    * When applied to a case class, instances are attached to the companion object
     *
     * {{{
     *   case class UserId(value: Int) extends AnyVal
@@ -89,9 +90,21 @@ final class AutoSlickMacros(val c: blackbox.Context) {
   }
 
   def mixinMacro[T](annottees: Tree*): Tree = infoTap {
-    val typName: TypeName = c.macroApplication match {
-      case Apply(q"new $_.Mixin[${tArg: TypeName}]().macroTransform", _) =>
-        tArg
+    val (typName, reprName) = c.macroApplication match {
+      case Apply(q"new $_[${tArg: Tree}]().macroTransform", _) =>
+        val tArgC = c.typecheck(tArg, mode = c.TYPEmode)
+
+        val tpe = tArgC.tpe
+        val typeName = tpe.typeSymbol.name.toTypeName
+
+        val fields = shapelessCopyPasta.fieldsOf(tpe)
+        if (fields.length != 1)
+          c.abort(c.enclosingPosition,
+                  s"$typeName must have only one field, found: $fields")
+        val reprType: Type = fields.head._2
+
+        (typeName, reprType.typeSymbol.name.toTypeName)
+
       case other =>
         c.abort(
           c.enclosingPosition,
@@ -105,7 +118,7 @@ final class AutoSlickMacros(val c: blackbox.Context) {
           ) =>
         q"""
          $mods trait $obj extends { ..$objEarlyDefs } with ..$objParents { $objSelf =>
-           ..${deriveInstancesGeneric(typName)}
+           ..${deriveInstancesGeneric(typName, Some(reprName))}
            ..$objDefs
          }
          """
@@ -114,7 +127,7 @@ final class AutoSlickMacros(val c: blackbox.Context) {
           ) =>
         q"""
          $mods object $obj extends { ..$objEarlyDefs } with ..$objParents { $objSelf =>
-           ..${deriveInstancesGeneric(typName)}
+           ..${deriveInstancesGeneric(typName, Some(reprName))}
            ..$objDefs
          }
          """
@@ -126,14 +139,15 @@ final class AutoSlickMacros(val c: blackbox.Context) {
     }
   }
 
-  def caseClassMacro(annottees: Tree*): Tree = infoTap {
+  def basicMacro(annottees: Tree*): Tree = infoTap {
     annottees match {
       // case class
       case List(clsDef: ClassDef) if clsDef.mods.hasFlag(Flag.CASE) =>
+        val reprType = wrappedField(clsDef)
         q"""
          $clsDef
          object ${clsDef.name.toTermName} {
-           ..${deriveInstancesGeneric(clsDef.name)}
+           ..${deriveInstancesGeneric(clsDef.name, Some(reprType))}
          }
          """
 
@@ -142,10 +156,11 @@ final class AutoSlickMacros(val c: blackbox.Context) {
           clsDef: ClassDef,
           q"..$mods object $objName extends { ..$objEarlyDefs } with ..$objParents { $objSelf => ..$objDefs }"
           ) if clsDef.mods.hasFlag(Flag.CASE) =>
+        val reprType = wrappedField(clsDef)
         q"""
          $clsDef
          $mods object $objName extends { ..$objEarlyDefs } with ..$objParents { $objSelf =>
-           ..${deriveInstancesGeneric(clsDef.name)}
+           ..${deriveInstancesGeneric(clsDef.name, Some(reprType))}
            ..$objDefs
          }
        """
@@ -157,6 +172,58 @@ final class AutoSlickMacros(val c: blackbox.Context) {
           "@AutoSlick must be used on a single-field case class or a trait extending SlickInstances[T]"
         )
     }
+  }
+
+  private[this] def wrappedField(clsDef: ClassDef): TypeName = {
+    val q"$_ class ${tpname: TypeName}[..$_] $_(...$paramss) extends { ..$_ } with ..$_ { $_ => ..$_ }" =
+      clsDef
+
+    if (paramss.length != 1)
+      c.abort(c.enclosingPosition,
+              s"$tpname has more than 1 constructor field: $paramss")
+
+    val List(q"$_ val $_: ${reprType: TypeName} = $_") = paramss.head
+    reprType
+  }
+
+  // copy-paste from shapeless I can't reuse because they are defined inside a whitebox macro, and I have a blackbox macro
+  private[this] object shapelessCopyPasta {
+    def fieldsOf(tpe: Type): List[(TermName, Type)] = {
+      val tSym = tpe.typeSymbol
+      if (tSym.isClass && isAnonOrRefinement(tSym)) Nil
+      else
+        tpe.decls.sorted collect {
+          case sym: TermSymbol if isCaseAccessorLike(sym) =>
+            (sym.name.toTermName, sym.typeSignatureIn(tpe).finalResultType)
+        }
+    }
+    def isAnonOrRefinement(sym: Symbol): Boolean = {
+      val nameStr = sym.name.toString
+      nameStr.contains("$anon") || nameStr == "<refinement>"
+    }
+
+    def isCaseAccessorLike(sym: TermSymbol): Boolean = {
+      def isGetter =
+        if (sym.owner.asClass.isCaseClass) sym.isCaseAccessor else sym.isGetter
+      sym.isPublic && isGetter && !isNonGeneric(sym)
+    }
+
+    def isNonGeneric(sym: Symbol): Boolean = {
+      import shapeless.nonGeneric
+      def check(sym: Symbol): Boolean = {
+        // See https://issues.scala-lang.org/browse/SI-7424
+        sym.typeSignature // force loading method's signature
+        sym.annotations.foreach(_.tree.tpe) // force loading all the annotations
+
+        sym.annotations.exists(_.tree.tpe =:= typeOf[nonGeneric])
+      }
+
+      // See https://issues.scala-lang.org/browse/SI-7561
+      check(sym) ||
+      (sym.isTerm && sym.asTerm.isAccessor && check(sym.asTerm.accessed)) ||
+      sym.overrides.exists(isNonGeneric)
+    }
+
   }
 
   // Set to true for easy macro debugging
@@ -188,12 +255,17 @@ final class AutoSlickMacros(val c: blackbox.Context) {
       q"$DeriveObj.iso[$tpFrom, $tpTo](from = $from, to = $to)"
     )
 
-  private[this] def deriveInstancesGeneric(typName: TypeName): List[Tree] =
+  private[this] def deriveInstancesGeneric(
+      typName: TypeName,
+      wrappedType: Option[TypeName]): List[Tree] = {
+
+    val buildDerive = q"new $DeriveObj.Partial[$typName].generic"
     deriveInstances(
       typName,
-      None /* TODO there must be a way to figure this out */,
-      q"new $DeriveObj.Partial[$typName].generic"
+      wrappedType,
+      buildDerive
     )
+  }
 
   private[this] def deriveInstances(
       typName: TypeName,
@@ -203,15 +275,14 @@ final class AutoSlickMacros(val c: blackbox.Context) {
 
     def name(tc: String) = TermName(s"slick${tc}For${typName.toTermName}")
 
+    // Use a fresh name so that we can mix in multiple to the same trait
     val deriver = c.freshName(TermName("deriver"))
     val deriverType = reprName
       .map(r => tq"$DeriveObj.Aux[$typName, $r]")
       .getOrElse(tq"$DeriveClass[$typName]")
 
     List(
-      // deriver has to be public because the `Repr` type is exposed publicly via the Isomorphism object
-      // The name is synthetic though, so scala code won't be able to refer to it directly
-      q"val $deriver: $deriverType = { import _root_.slick.jdbc.PostgresProfile.api._; $buildDerive }",
+      q"private[this] val $deriver: $deriverType = { import _root_.slick.jdbc.PostgresProfile.api._; $buildDerive }",
       q"final implicit lazy val ${name("GetResult")}: $GR[$typName] = $deriver.getResult",
       q"final implicit lazy val ${name("GetResultOpt")}: $GR[Option[$typName]] = $deriver.getResultOpt",
       q"final implicit lazy val ${name("SetParameter")}: $SP[$typName] = $deriver.setParameter",

@@ -12,6 +12,11 @@ trait UserIdInstances
 @AutoSlick
 case class UserName(value: String) extends AnyVal
 
+object CheckBasicMacroIso {
+  val x: Isomorphism[UserName, String] =
+    implicitly[Isomorphism[UserName, String]]
+}
+
 @AutoSlick // With companion object
 case class Age(value: Int) extends AnyVal
 
@@ -71,8 +76,7 @@ trait CheckImporting {
 @AutoSlick.Mixin[UserId]
 @AutoSlick.Iso[Wrapped, String](new Wrapped(_), _.value)
 object CheckIsomorphism {
-  // TODO
-  // val x: Isomorphism[UserId, Int] = implicitly[Isomorphism[UserId, Int]]
-  
+  val x: Isomorphism[UserId, Int] = implicitly[Isomorphism[UserId, Int]]
+
   val y: Isomorphism[Wrapped, String] = implicitly[Isomorphism[Wrapped, String]]
 }
