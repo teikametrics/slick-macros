@@ -20,7 +20,6 @@ trait Derive[A] {
   def setParameter: SetParameter[A]
   def setParameterOpt: SetParameter[Option[A]]
   def baseColumnType: BaseTypedType[A] with TypedType[A] with JdbcType[A]
-  def typedType: TypedType[A] = baseColumnType
 
   // Slick doesn't really intend for Isomorphism to be used as a wrapping type, but we use it to be able to
   // declare typed column extension methods for Isomorphism-mapped types

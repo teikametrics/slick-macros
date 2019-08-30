@@ -118,7 +118,7 @@ final class AutoSlickMacros(val c: blackbox.Context) {
           ) =>
         q"""
          $mods trait $obj extends { ..$objEarlyDefs } with ..$objParents { $objSelf =>
-           ..${deriveInstancesGeneric(typName, Some(reprName))}
+           ..${deriveInstancesGeneric(typName, reprName)}
            ..$objDefs
          }
          """
@@ -127,7 +127,7 @@ final class AutoSlickMacros(val c: blackbox.Context) {
           ) =>
         q"""
          $mods object $obj extends { ..$objEarlyDefs } with ..$objParents { $objSelf =>
-           ..${deriveInstancesGeneric(typName, Some(reprName))}
+           ..${deriveInstancesGeneric(typName, reprName)}
            ..$objDefs
          }
          """
@@ -147,7 +147,7 @@ final class AutoSlickMacros(val c: blackbox.Context) {
         q"""
          $clsDef
          object ${clsDef.name.toTermName} {
-           ..${deriveInstancesGeneric(clsDef.name, Some(reprType))}
+           ..${deriveInstancesGeneric(clsDef.name, reprType)}
          }
          """
 
@@ -160,7 +160,7 @@ final class AutoSlickMacros(val c: blackbox.Context) {
         q"""
          $clsDef
          $mods object $objName extends { ..$objEarlyDefs } with ..$objParents { $objSelf =>
-           ..${deriveInstancesGeneric(clsDef.name, Some(reprType))}
+           ..${deriveInstancesGeneric(clsDef.name, reprType)}
            ..$objDefs
          }
        """
@@ -237,8 +237,6 @@ final class AutoSlickMacros(val c: blackbox.Context) {
   private[this] val ISO: TypeSymbol =
     typeOf[Isomorphism[_, _]].typeSymbol.asType
 
-  private[this] val DeriveClass: TypeSymbol =
-    typeOf[Derive[_]].typeSymbol.asType
   private[this] val DeriveObj: TermSymbol =
     typeOf[Derive.type].termSymbol.asTerm
 
@@ -251,13 +249,13 @@ final class AutoSlickMacros(val c: blackbox.Context) {
   ): List[Tree] =
     deriveInstances(
       tpFrom,
-      Some(tpTo),
+      tpTo,
       q"$DeriveObj.iso[$tpFrom, $tpTo](from = $from, to = $to)"
     )
 
   private[this] def deriveInstancesGeneric(
       typName: TypeName,
-      wrappedType: Option[TypeName]): List[Tree] = {
+      wrappedType: TypeName): List[Tree] = {
 
     val buildDerive = q"new $DeriveObj.Partial[$typName].generic"
     deriveInstances(
@@ -269,7 +267,7 @@ final class AutoSlickMacros(val c: blackbox.Context) {
 
   private[this] def deriveInstances(
       typName: TypeName,
-      reprName: Option[TypeName],
+      reprName: TypeName,
       buildDerive: Tree
   ): List[Tree] = {
 
@@ -277,9 +275,7 @@ final class AutoSlickMacros(val c: blackbox.Context) {
 
     // Use a fresh name so that we can mix in multiple to the same trait
     val deriver = c.freshName(TermName("deriver"))
-    val deriverType = reprName
-      .map(r => tq"$DeriveObj.Aux[$typName, $r]")
-      .getOrElse(tq"$DeriveClass[$typName]")
+    val deriverType = tq"$DeriveObj.Aux[$typName, $reprName]"
 
     List(
       q"private[this] val $deriver: $deriverType = { import _root_.slick.jdbc.PostgresProfile.api._; $buildDerive }",
@@ -287,17 +283,16 @@ final class AutoSlickMacros(val c: blackbox.Context) {
       q"final implicit lazy val ${name("GetResultOpt")}: $GR[Option[$typName]] = $deriver.getResultOpt",
       q"final implicit lazy val ${name("SetParameter")}: $SP[$typName] = $deriver.setParameter",
       q"final implicit lazy val ${name("SetParameterOpt")}: $SP[Option[$typName]] = $deriver.setParameterOpt",
-      q"final implicit lazy val ${name("ColumnType")}: $BTT[$typName] with $TT[$typName] with $JT[$typName] = $deriver.baseColumnType"
-    ) ++
-      reprName.map(
-        r =>
-          q"final implicit lazy val ${name("Isomorphism")}: $ISO[$typName, $r] = $deriver.isomorphism"
-      )
+      q"final implicit lazy val ${name("ColumnType")}: $BTT[$typName] with $TT[$typName] with $JT[$typName] = $deriver.baseColumnType",
+      q"final implicit lazy val ${name("Isomorphism")}: $ISO[$typName, $reprName] = $deriver.isomorphism",
+    )
 
   }
 
   private[this] def infoTap(tree: Tree): Tree = {
-    c.info(c.enclosingPosition, tree.toString, forceInfo)
+    // force=false doesn't actually prevent the compiler from printing, it just *allows* the compiler to not print.
+    // When it does print, this gets noisy over a whole codebase, so don't bother calling c.info when false
+    if (forceInfo) c.info(c.enclosingPosition, tree.toString, force = true)
     tree
   }
 
